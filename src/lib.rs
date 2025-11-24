@@ -1,11 +1,11 @@
 use std::io::Write;
 
-use lsp_server::Message;
 use lsp_types::notification::{DidSaveTextDocument, Notification};
-use lsp_types::request::{DocumentDiagnosticRequest, Request};
+use lsp_types::request::{DocumentDiagnosticRequest, HoverRequest, Request};
 use lsp_types::{
-    DocumentDiagnosticParams, DocumentDiagnosticReport, FullDocumentDiagnosticReport,
-    InitializeParams, InitializeResult, RelatedFullDocumentDiagnosticReport, ServerInfo,
+    error_codes, DocumentDiagnosticParams, DocumentDiagnosticReport, FullDocumentDiagnosticReport,
+    Hover, HoverContents, HoverParams, InitializeParams, InitializeResult, MarkupContent,
+    MarkupKind, RelatedFullDocumentDiagnosticReport, ServerInfo, TextDocumentPositionParams,
     WorkspaceFolder,
 };
 
@@ -53,16 +53,16 @@ fn run_lsp(conn: &lsp_server::Connection) -> Result<(), Box<dyn std::error::Erro
 
     for msg in &conn.receiver {
         match msg {
-            Message::Request(req) => {
+            lsp_server::Message::Request(req) => {
                 if conn.handle_shutdown(&req)? {
                     break;
                 }
 
                 let response = language_server.handle_request(req);
-                conn.sender.send(Message::Response(response))?;
+                conn.sender.send(lsp_server::Message::Response(response))?;
             }
-            Message::Response(_) => {}
-            Message::Notification(notification) => {
+            lsp_server::Message::Response(_) => {}
+            lsp_server::Message::Notification(notification) => {
                 language_server.handle_notification(notification);
             }
         }
@@ -104,7 +104,35 @@ impl LanguageServer {
                     ),
                     Err(e) => lsp_server::Response::new_err(
                         request_id,
-                        lsp_types::error_codes::REQUEST_FAILED as i32,
+                        error_codes::REQUEST_FAILED as i32,
+                        e.to_string(),
+                    ),
+                }
+            }
+            HoverRequest::METHOD => {
+                let (request_id, params) = request
+                    .extract::<HoverParams>(HoverRequest::METHOD)
+                    .unwrap();
+
+                let TextDocumentPositionParams {
+                    text_document,
+                    position,
+                } = params.text_document_position_params;
+
+                match self.handler.hover(text_document.uri, position) {
+                    Ok(result) => lsp_server::Response::new_ok(
+                        request_id,
+                        Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value: result.join("\n\n"),
+                            }),
+                            range: None,
+                        },
+                    ),
+                    Err(e) => lsp_server::Response::new_err(
+                        request_id,
+                        error_codes::REQUEST_FAILED as i32,
                         e.to_string(),
                     ),
                 }
@@ -114,7 +142,7 @@ impl LanguageServer {
 
                 lsp_server::Response::new_err(
                     request.id,
-                    lsp_types::error_codes::REQUEST_FAILED as i32,
+                    error_codes::REQUEST_FAILED as i32,
                     "Not yet implemented".to_string(),
                 )
             }
@@ -144,7 +172,7 @@ pub fn debug_to_file<S: AsRef<str>>(text: S) {
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
-        .open(format!("{}/debug.log", env!("CARGO_MANIFEST_PATH")))
+        .open(format!("{}/debug.log", env!("CARGO_MANIFEST_DIR")))
     {
         let _ = f.write_all(text.as_ref().as_bytes());
         let _ = f.write_all(b"\n\n");

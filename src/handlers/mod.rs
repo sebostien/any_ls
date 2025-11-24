@@ -1,14 +1,16 @@
 use std::fmt;
 
 use lsp_types::{
-    Diagnostic, PositionEncodingKind, ServerCapabilities, TextDocumentSyncCapability,
+    Diagnostic, Position, PositionEncodingKind, ServerCapabilities, TextDocumentSyncCapability,
     TextDocumentSyncKind, Uri,
 };
 use serde_json::Value;
 
 mod just;
+mod props;
 
-pub use just::Just;
+use just::JustHandler;
+use props::PropsHandler;
 
 #[derive(Debug)]
 pub enum HandlerError {
@@ -32,7 +34,13 @@ pub trait Handler {
 
     fn get_capabilities(&self) -> ServerCapabilities;
 
-    fn update_diagnostics(&mut self, contents: &str) -> Result<Vec<Diagnostic>, HandlerError>;
+    fn update_diagnostics(&mut self, _contents: &str) -> Result<Vec<Diagnostic>, HandlerError> {
+        Ok(Vec::new())
+    }
+
+    fn hover(&self, _contents: &str, _position: Position) -> Result<Option<String>, HandlerError> {
+        Ok(None)
+    }
 }
 
 #[derive(Default)]
@@ -54,15 +62,19 @@ impl std::fmt::Debug for AnyHandler {
 
 #[derive(Debug)]
 pub enum AllHandlers {
-    Just(Just),
+    Just(JustHandler),
+    Props(PropsHandler),
 }
 
 impl AnyHandler {
     #[must_use]
     pub fn new() -> Self {
-        let mut this = Self::default();
+        let mut this = Self {
+            handlers: vec![AllHandlers::Props(PropsHandler::new())],
+            text_documents: Default::default(),
+        };
 
-        if let Some(just) = Just::new() {
+        if let Some(just) = JustHandler::new() {
             this.handlers.push(AllHandlers::Just(just));
         }
 
@@ -72,13 +84,6 @@ impl AnyHandler {
     pub fn handle_notification(&mut self, method: &str, params: &Value) -> bool {
         self.text_documents.listen(method, params)
     }
-
-    // pub fn from_filetype(filetype: &str) -> Option<Self> {
-    //     match filetype {
-    //         "just" => Some(Self::Just(Just::new().ok()?)),
-    //         _ => None,
-    //     }
-    // }
 }
 
 impl AnyHandler {
@@ -179,29 +184,70 @@ impl AnyHandler {
 
         Ok(diagnostics)
     }
+
+    pub fn hover(&mut self, uri: Uri, position: Position) -> Result<Vec<String>, HandlerError> {
+        let text_document = self
+            .text_documents
+            .get_document(&uri)
+            .ok_or(HandlerError::NoSuchDocument { uri })?;
+
+        let content = text_document.get_content(None);
+
+        let mut info = Vec::new();
+        let mut errors = Vec::new();
+
+        for handler in &mut self.handlers {
+            if !handler.filetype_supported(text_document.language_id()) {
+                continue;
+            }
+
+            match handler.hover(content, position) {
+                Ok(Some(new_info)) => {
+                    info.push(new_info);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    errors.push(e);
+                }
+            }
+        }
+
+        if info.is_empty() {
+            if let Some(last) = errors.pop() {
+                return Err(last);
+            }
+        }
+
+        Ok(info)
+    }
 }
 
-impl AllHandlers {}
+macro_rules! impl_handlers {
+    ($this:ident, $func:ident; $($params:ident),*) => {
+        match $this {
+            Self::Just(handler) => handler.$func($($params),*),
+            Self::Props(handler) => handler.$func($($params),*),
+        }
+    };
+}
 
 impl Handler for AllHandlers {
     fn filetype_supported(&self, filetype: &str) -> bool {
-        match self {
-            Self::Just(just) => just.filetype_supported(filetype),
-        }
+        impl_handlers!(self, filetype_supported; filetype)
     }
 
     fn get_capabilities(&self) -> ServerCapabilities {
-        match self {
-            Self::Just(just) => just.get_capabilities(),
-        }
+        impl_handlers!(self, get_capabilities;)
     }
 
     fn update_diagnostics(
         &mut self,
         document_contents: &str,
     ) -> Result<Vec<Diagnostic>, HandlerError> {
-        match self {
-            Self::Just(just) => just.update_diagnostics(document_contents),
-        }
+        impl_handlers!(self, update_diagnostics; document_contents)
+    }
+
+    fn hover(&self, contents: &str, position: Position) -> Result<Option<String>, HandlerError> {
+        impl_handlers!(self, hover; contents, position)
     }
 }

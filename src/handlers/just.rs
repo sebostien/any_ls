@@ -10,13 +10,13 @@ use tempfile::NamedTempFile;
 use super::{Handler, HandlerError};
 
 #[derive(Debug)]
-pub struct Just {
+pub struct JustHandler {
     #[allow(unused)]
     version: String,
     temp_file: NamedTempFile,
 }
 
-impl Just {
+impl JustHandler {
     #[must_use]
     pub fn new() -> Option<Self> {
         let out = Command::new("just").arg("--version").output().ok()?;
@@ -27,9 +27,38 @@ impl Just {
             temp_file: NamedTempFile::new().ok()?,
         })
     }
+
+    #[must_use]
+    fn parse_stderr(contents: &str) -> Vec<Diagnostic> {
+        if let Some((_, severity, message, line, col)) =
+            regex_captures!(r#"(\w+):\s(.*)\n.*——▶.*:(\d+):(\d+)"#, contents)
+        {
+            let line: u32 = line.parse().unwrap_or(0);
+            let col: u32 = col.parse().unwrap_or(0);
+
+            let mut diag = Diagnostic::new_simple(
+                lsp_types::Range {
+                    start: Position::new(line.saturating_sub(1), col.saturating_sub(1)),
+                    end: Position::new(line.saturating_sub(1), col),
+                },
+                message.to_string(),
+            );
+            diag.severity = parse_severity(severity);
+
+            vec![diag]
+        } else {
+            log::warn!("Could not parse stderr: '{contents}'");
+            vec![]
+        }
+    }
+
+    #[must_use]
+    fn parse_stdout(_contents: &str) -> Vec<Diagnostic> {
+        vec![]
+    }
 }
 
-impl Handler for Just {
+impl Handler for JustHandler {
     fn filetype_supported(&self, filetype: &str) -> bool {
         matches!(filetype, "just" | "justfile")
     }
@@ -80,37 +109,6 @@ impl Handler for Just {
     }
 }
 
-impl Just {
-    #[must_use]
-    pub fn parse_stderr(contents: &str) -> Vec<Diagnostic> {
-        if let Some((_, severity, message, line, col)) =
-            regex_captures!(r#"(\w+):\s(.*)\n.*——▶.*:(\d+):(\d+)"#, contents)
-        {
-            let line: u32 = line.parse().unwrap_or(0);
-            let col: u32 = col.parse().unwrap_or(0);
-
-            let mut diag = Diagnostic::new_simple(
-                lsp_types::Range {
-                    start: Position::new(line.saturating_sub(1), col.saturating_sub(1)),
-                    end: Position::new(line.saturating_sub(1), col),
-                },
-                message.to_string(),
-            );
-            diag.severity = parse_severity(severity);
-
-            vec![diag]
-        } else {
-            log::warn!("Could not parse stderr: '{contents}'");
-            vec![]
-        }
-    }
-
-    #[must_use]
-    pub fn parse_stdout(_contents: &str) -> Vec<Diagnostic> {
-        vec![]
-    }
-}
-
 fn parse_severity(severity: &str) -> Option<DiagnosticSeverity> {
     match severity {
         "error" => Some(DiagnosticSeverity::ERROR),
@@ -125,7 +123,7 @@ fn parse_severity(severity: &str) -> Option<DiagnosticSeverity> {
 mod tests {
     use lsp_types::{Diagnostic, Position, Range};
 
-    use crate::handlers::just::{parse_severity, Just};
+    use crate::handlers::just::{parse_severity, JustHandler};
 
     #[test]
     fn test_parse() {
@@ -146,7 +144,7 @@ mod tests {
         );
         r1.severity = parse_severity("error");
 
-        assert_eq!(Just::parse_stderr(&e1), vec![r1]);
+        assert_eq!(JustHandler::parse_stderr(&e1), vec![r1]);
 
         let e2 = [
             "error: Expected '&&', comment, end of file, end of line, identifier, or '(', but found ':'",
@@ -165,6 +163,6 @@ mod tests {
         );
         r2.severity = parse_severity("error");
 
-        assert_eq!(Just::parse_stderr(&e2), vec![r2]);
+        assert_eq!(JustHandler::parse_stderr(&e2), vec![r2]);
     }
 }
